@@ -1,0 +1,56 @@
+syntax = "proto3";
+option go_package = "./cemm";
+import "google/protobuf/empty.proto";
+package CEMM;
+
+service CEMM {
+
+
+  rpc get (GetRequest) returns ( stream GetReply) {}
+  rpc add (AddRequest) returns ( google.protobuf.Empty ) {}
+  rpc getOrIncRound (RoundRequest) returns (RoundReply) {}
+  rpc init(stream InitRequest) returns (google.protobuf.Empty) {}
+
+}
+
+message AddToken
+{
+  bytes addr =1;
+  bytes node =2;
+}
+
+message InitRequest
+{
+  bytes hw =1;
+  repeated AddToken nodes =2;
+}
+
+message GetRequest
+{
+  bytes tag =1;
+  bytes st =2;
+}
+
+message GetReply
+{
+  bytes node =1;
+}
+
+
+message AddRequest
+{
+  AddToken next =1;
+  AddToken preNext =2;
+}
+
+message RoundRequest
+{
+  bool op =1;
+  bytes hw =2;
+}
+
+message RoundReply
+{
+  uint32 round =1;
+}
+
