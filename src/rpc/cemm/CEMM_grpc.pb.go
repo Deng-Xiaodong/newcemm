@@ -20,10 +20,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	CEMM_Get_FullMethodName           = "/CEMM.CEMM/get"
-	CEMM_Add_FullMethodName           = "/CEMM.CEMM/add"
-	CEMM_GetOrIncRound_FullMethodName = "/CEMM.CEMM/getOrIncRound"
-	CEMM_Init_FullMethodName          = "/CEMM.CEMM/init"
+	CEMM_Get_FullMethodName         = "/CEMM.CEMM/get"
+	CEMM_Add_FullMethodName         = "/CEMM.CEMM/add"
+	CEMM_AddRound_FullMethodName    = "/CEMM.CEMM/addRound"
+	CEMM_SearchRound_FullMethodName = "/CEMM.CEMM/searchRound"
+	CEMM_Init_FullMethodName        = "/CEMM.CEMM/init"
 )
 
 // CEMMClient is the client API for CEMM service.
@@ -32,7 +33,8 @@ const (
 type CEMMClient interface {
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetReply], error)
 	Add(ctx context.Context, in *AddRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	GetOrIncRound(ctx context.Context, in *RoundRequest, opts ...grpc.CallOption) (*RoundReply, error)
+	AddRound(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*AddRoundReply, error)
+	SearchRound(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SearchRoundReply, error)
 	Init(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InitRequest, emptypb.Empty], error)
 }
 
@@ -73,10 +75,20 @@ func (c *cEMMClient) Add(ctx context.Context, in *AddRequest, opts ...grpc.CallO
 	return out, nil
 }
 
-func (c *cEMMClient) GetOrIncRound(ctx context.Context, in *RoundRequest, opts ...grpc.CallOption) (*RoundReply, error) {
+func (c *cEMMClient) AddRound(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*AddRoundReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RoundReply)
-	err := c.cc.Invoke(ctx, CEMM_GetOrIncRound_FullMethodName, in, out, cOpts...)
+	out := new(AddRoundReply)
+	err := c.cc.Invoke(ctx, CEMM_AddRound_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cEMMClient) SearchRound(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SearchRoundReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SearchRoundReply)
+	err := c.cc.Invoke(ctx, CEMM_SearchRound_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +114,8 @@ type CEMM_InitClient = grpc.ClientStreamingClient[InitRequest, emptypb.Empty]
 type CEMMServer interface {
 	Get(*GetRequest, grpc.ServerStreamingServer[GetReply]) error
 	Add(context.Context, *AddRequest) (*emptypb.Empty, error)
-	GetOrIncRound(context.Context, *RoundRequest) (*RoundReply, error)
+	AddRound(context.Context, *emptypb.Empty) (*AddRoundReply, error)
+	SearchRound(context.Context, *emptypb.Empty) (*SearchRoundReply, error)
 	Init(grpc.ClientStreamingServer[InitRequest, emptypb.Empty]) error
 	mustEmbedUnimplementedCEMMServer()
 }
@@ -120,8 +133,11 @@ func (UnimplementedCEMMServer) Get(*GetRequest, grpc.ServerStreamingServer[GetRe
 func (UnimplementedCEMMServer) Add(context.Context, *AddRequest) (*emptypb.Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Add not implemented")
 }
-func (UnimplementedCEMMServer) GetOrIncRound(context.Context, *RoundRequest) (*RoundReply, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetOrIncRound not implemented")
+func (UnimplementedCEMMServer) AddRound(context.Context, *emptypb.Empty) (*AddRoundReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddRound not implemented")
+}
+func (UnimplementedCEMMServer) SearchRound(context.Context, *emptypb.Empty) (*SearchRoundReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SearchRound not implemented")
 }
 func (UnimplementedCEMMServer) Init(grpc.ClientStreamingServer[InitRequest, emptypb.Empty]) error {
 	return status.Errorf(codes.Unimplemented, "method Init not implemented")
@@ -176,20 +192,38 @@ func _CEMM_Add_Handler(srv interface{}, ctx context.Context, dec func(interface{
 	return interceptor(ctx, in, info, handler)
 }
 
-func _CEMM_GetOrIncRound_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RoundRequest)
+func _CEMM_AddRound_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CEMMServer).GetOrIncRound(ctx, in)
+		return srv.(CEMMServer).AddRound(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: CEMM_GetOrIncRound_FullMethodName,
+		FullMethod: CEMM_AddRound_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CEMMServer).GetOrIncRound(ctx, req.(*RoundRequest))
+		return srv.(CEMMServer).AddRound(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CEMM_SearchRound_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CEMMServer).SearchRound(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CEMM_SearchRound_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CEMMServer).SearchRound(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -213,8 +247,12 @@ var CEMM_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CEMM_Add_Handler,
 		},
 		{
-			MethodName: "getOrIncRound",
-			Handler:    _CEMM_GetOrIncRound_Handler,
+			MethodName: "addRound",
+			Handler:    _CEMM_AddRound_Handler,
+		},
+		{
+			MethodName: "searchRound",
+			Handler:    _CEMM_SearchRound_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

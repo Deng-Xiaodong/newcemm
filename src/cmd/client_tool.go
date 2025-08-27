@@ -2,7 +2,6 @@ package main
 
 import (
 	"DRW/src/client"
-	"DRW/src/config"
 	"DRW/src/rpc/cemm"
 	"bufio"
 	"fmt"
@@ -29,7 +28,6 @@ func main() {
 		log.Fatal(err)
 	}
 	defer conn.Close()
-	cf := config.GetDefaultConfig()
 	var emmClient *client.EMMClient
 
 	app := &cli.App{
@@ -47,7 +45,7 @@ func main() {
 					},
 				},
 				Action: func(c *cli.Context) error {
-					emmClient = client.NewEMMClient(c.Int("id"), cf, cemm.NewCEMMClient(conn))
+					emmClient = client.NewEMMClient(c.Int("id"), cemm.NewCEMMClient(conn))
 					startInteractiveCLI(emmClient)
 					return nil
 				},

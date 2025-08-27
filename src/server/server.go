@@ -2,10 +2,9 @@ package server
 
 import (
 	"DRW/src/rpc/cemm"
+	"DRW/src/utils"
 	"context"
-	"encoding/binary"
 	"errors"
-	"github.com/dgraph-io/badger/v4"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"io"
@@ -17,87 +16,58 @@ import (
 )
 
 type AtomicCounter struct {
-	value uint32
+	value int64
 }
 
-func NewAtomicCounter(v uint32) *AtomicCounter {
+func NewAtomicCounter(v int64) *AtomicCounter {
 	return &AtomicCounter{v}
 }
-func (ac *AtomicCounter) Load() uint32 {
-	return atomic.LoadUint32(&ac.value)
+func (ac *AtomicCounter) Load() int64 {
+	return atomic.LoadInt64(&ac.value)
 }
-func (ac *AtomicCounter) FetchAndInc() uint32 {
+func (ac *AtomicCounter) CAS(old, new int64) bool {
+	return atomic.CompareAndSwapInt64(&ac.value, old, new)
+}
+func (ac *AtomicCounter) FetchAndInc() int64 {
 	for {
-		old := atomic.LoadUint32(&ac.value)
-		if atomic.CompareAndSwapUint32(&ac.value, old, old+1) {
+		old := atomic.LoadInt64(&ac.value)
+		if atomic.CompareAndSwapInt64(&ac.value, old, old+1) {
 			return old
 		}
 	}
 }
 
-type Cache interface {
-	Read(key []byte) ([]byte, error)
-	Write(key []byte, value []byte) error
-}
-type Memory struct {
-	Db sync.Map
-}
-
-func (m *Memory) Read(key []byte) ([]byte, error) {
-	value, ok := m.Db.Load(string(key))
-	if !ok {
-		return nil, nil
-	}
-	return value.([]byte), nil
-}
-
-func (m *Memory) Write(key []byte, value []byte) error {
-	m.Db.Store(string(key), value)
-	return nil
-}
-
-type Disk struct {
-	Db *badger.DB
-}
-
-func (d *Disk) Read(key []byte) ([]byte, error) {
-	// 3. 读取数据
-	var value []byte
-	return value, d.Db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
-		if err != nil {
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				return nil
-			}
-			return err
-		}
-		if item != nil {
-			value, err = item.ValueCopy(nil)
-		}
-		return err
-	})
-}
-
-func (d *Disk) Write(key []byte, value []byte) error {
-	// 2. 写入数据
-	return d.Db.Update(func(txn *badger.Txn) error {
-		var err error
-		err = txn.Set(key, value)
-		if err != nil {
-			return err
-		}
-		return nil
-	})
-}
-
 type EMMServer struct {
 	cemm.UnimplementedCEMMServer
 
-	cnt      *AtomicCounter
-	round    map[string]*AtomicCounter
-	db       Cache
-	workChan chan int64
-	tc       int
+	version *AtomicCounter
+	round   *AtomicCounter
+	db      sync.Map
+	vsDb    sync.Map
+
+	//workChan chan int64
+	//tc       int
+}
+
+func (s *EMMServer) AddRound(ctx context.Context, empty *emptypb.Empty) (*cemm.AddRoundReply, error) {
+	return &cemm.AddRoundReply{
+		Round: s.round.Load(),
+	}, nil
+}
+
+func (s *EMMServer) SearchRound(ctx context.Context, empty *emptypb.Empty) (*cemm.SearchRoundReply, error) {
+	var r, vs int64
+	for {
+		r = s.round.Load()
+		vs = s.version.FetchAndInc()
+		if s.round.CAS(r, r+1) {
+			break
+		}
+	}
+	return &cemm.SearchRoundReply{
+		Round: r,
+		Vs:    vs,
+	}, nil
 }
 
 func (s *EMMServer) Init(stream grpc.ClientStreamingServer[cemm.InitRequest, emptypb.Empty]) error {
@@ -109,126 +79,83 @@ func (s *EMMServer) Init(stream grpc.ClientStreamingServer[cemm.InitRequest, emp
 			}
 			return err
 		}
-
-		stag := string(req.Hw)
-		if stag != "" {
-			s.round[stag] = NewAtomicCounter(1)
-		}
-
+		var v int64 = 1
 		for _, data := range req.Nodes {
-			err = s.db.Write(data.Addr, data.Node)
-			if err != nil {
-				return err
-			}
+			s.vsDb.Store(string(data.Addr), &v)
+			s.db.Store(string(data.Addr), data.Node)
 		}
 
 	}
 }
 
-func NewEMMServer(db Cache, wc chan int64) *EMMServer {
+func NewEMMServer() *EMMServer {
 	s := &EMMServer{
-		db:       db,
-		cnt:      NewAtomicCounter(2),
-		round:    make(map[string]*AtomicCounter),
-		workChan: wc,
+		version: NewAtomicCounter(2), //初始DB和查询结点的版本号为1
+		round:   NewAtomicCounter(1),
 	}
 	return s
 }
 
 func (s *EMMServer) Get(in *cemm.GetRequest, stream grpc.ServerStreamingServer[cemm.GetReply]) error {
-	//进入线性化点
-	countGet := s.cnt.FetchAndInc()
 
-	//tag := in.Tag
-	st := in.St
-	var data []byte
+	sts := in.Sts
+	tw := in.Tw
+	svs := in.Vs
 
-	var count uint32
-	now := time.Now()
-	for {
-		//addr := utils.H1(string(slices.Concat(tag, st)))
+	for _, sst := range sts {
+		st := sst
+		for {
+			ut := utils.H1(string(slices.Concat(tw, st)))
+			value, ok1 := s.db.Load(string(ut))
+			if !ok1 {
+				break
+			}
+			data := value.([]byte)
+			cid := data[:32]
+			st = utils.Xor(data[32:], utils.H2(string(slices.Concat(tw, st))))
 
-		//value, err := s.db.Read(addr)
-		value, err := s.db.Read(st)
-		if err != nil {
-			log.Printf("EDB read  error: %v", err)
-			return err
-		}
-		if value == nil {
-			break
-		}
+			vs, ok2 := s.vsDb.Load(string(ut))
+			if !ok2 {
+				return errors.New("not found version")
+			}
+			vv := vs.(*int64)
+			for {
+				v := atomic.LoadInt64(vv)
+				if v > 0 {
+					if v < svs {
+						_ = stream.Send(&cemm.GetReply{Node: cid})
+					} else {
+						log.Printf("miss node svs(%d)<nv(%d)\n", svs, v)
+					}
+					break
+				} else {
+					if atomic.CompareAndSwapInt64(vv, v, -svs) {
+						break
+					}
+				}
 
-		//检查可见性
-		count = binary.BigEndian.Uint32(value[:4])
-		//_ = count
-		data = value[36:]
-		st = value[4:36]
-		//st = utils.Xor(value[4:36], utils.H2(string(slices.Concat(tag, st))))
-		if count == 0 || count > countGet {
-			//log.Printf("get miss node with count   %v", count)
-			continue
-		}
-		err = stream.Send(&cemm.GetReply{Node: slices.Clone(data)})
-		if err != nil {
-			log.Printf("server send error: %v", err)
-			return err
+			}
 		}
 	}
-	if s.tc%100 == 0 {
-		s.workChan <- time.Since(now).Microseconds()
-	}
-	s.tc++
+
 	return nil
 }
 
-func (s *EMMServer) GetOrIncRound(ctx context.Context, in *cemm.RoundRequest) (*cemm.RoundReply, error) {
-	stag := string(in.Hw)
-	t, ok := s.round[stag]
-	if !ok || t == nil {
-		log.Println("EDB get round error: init error")
-		return nil, errors.New("init error")
-	}
-
-	rly := &cemm.RoundReply{}
-	if in.Op {
-		//查询
-		rly.Round = t.FetchAndInc()
-	} else {
-		//添加
-		rly.Round = t.Load()
-	}
-	return rly, nil
-}
-
 func (s *EMMServer) Add(ctx context.Context, in *cemm.AddRequest) (*emptypb.Empty, error) {
+	var v int64
+	s.vsDb.Store(string(in.NewNode.Addr), &v)
+	s.db.Store(string(in.NewNode.Addr), in.NewNode.Node)
+	s.db.Store(string(in.SrchNode.Addr), in.SrchNode.Node)
 
-	err := s.db.Write(in.Next.Addr, in.Next.Node)
-	if err != nil {
-		log.Println("EDB write next error:", err)
-		return &emptypb.Empty{}, err
-	}
-
-	err = s.db.Write(in.PreNext.Addr, in.PreNext.Node)
-	if err != nil {
-		log.Println("EDB write preNext error:", err)
-		return &emptypb.Empty{}, err
-	}
-
-	fullNode(s.cnt.FetchAndInc(), in.Next.Node)
-	//线性化点
-	log.Println("EDB add node with count :", binary.BigEndian.Uint32(in.Next.Node[:4]))
-	for s.db.Write(in.Next.Addr, in.Next.Node) != nil {
+	time.Sleep(6 * time.Millisecond) //测试用
+	for {
+		val := atomic.LoadInt64(&v)
+		vs := s.version.FetchAndInc()
+		if atomic.CompareAndSwapInt64(&v, val, vs) {
+			//log.Printf("add node version: %d\n", vs)
+			break
+		}
 	}
 
 	return &emptypb.Empty{}, nil
-}
-
-// 功能函数
-func parseNode(node []byte) (st, data []byte) {
-	st = node[:32]
-	data = node[32:]
-	return
-}
-func fullNode(count uint32, node []byte) {
-	binary.BigEndian.PutUint32(node[:4], count)
 }

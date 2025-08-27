@@ -8,7 +8,8 @@ service CEMM {
 
   rpc get (GetRequest) returns ( stream GetReply) {}
   rpc add (AddRequest) returns ( google.protobuf.Empty ) {}
-  rpc getOrIncRound (RoundRequest) returns (RoundReply) {}
+  rpc addRound (google.protobuf.Empty) returns (AddRoundReply) {}
+  rpc searchRound (google.protobuf.Empty) returns (SearchRoundReply) {}
   rpc init(stream InitRequest) returns (google.protobuf.Empty) {}
 
 }
@@ -21,14 +22,14 @@ message AddToken
 
 message InitRequest
 {
-  bytes hw =1;
-  repeated AddToken nodes =2;
+  repeated AddToken nodes =1;
 }
 
 message GetRequest
 {
-  bytes tag =1;
-  bytes st =2;
+  bytes tw =1;
+  repeated bytes sts =2;
+  int64 vs =3;
 }
 
 message GetReply
@@ -39,18 +40,18 @@ message GetReply
 
 message AddRequest
 {
-  AddToken next =1;
-  AddToken preNext =2;
+  AddToken newNode =1;
+  AddToken srchNode =2;
 }
 
-message RoundRequest
+
+message AddRoundReply
 {
-  bool op =1;
-  bytes hw =2;
+  int64 round =1;
 }
 
-message RoundReply
+message SearchRoundReply
 {
-  uint32 round =1;
+  int64 round =1;
+  int64 vs =2;
 }
-

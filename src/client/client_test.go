@@ -1,82 +1,95 @@
 package client
 
 import (
-	"DRW/src/config"
 	"DRW/src/rpc/cemm"
 	"fmt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"log"
-	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
+func getCli(uid int) *EMMClient {
+	c, err := grpc.NewClient("127.0.0.1:19091", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatal(err)
+	}
+	cli := NewEMMClient(uid, cemm.NewCEMMClient(c))
+	return cli
+}
+func TestEMMClient_Init(t *testing.T) {
+	cli := getCli(1)
+	if err := cli.Init([]string{"w1"}); err != nil {
+		log.Fatal(err)
+	}
+	log.Println("init success")
+}
+func TestEMMClient_Add(t *testing.T) {
+	cli := getCli(2)
+	err := cli.Add("w1", "2_3")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+func TestEMMClient_Get(t *testing.T) {
+	cli := getCli(1)
+	if got, err := cli.Get("w1"); err != nil {
+		t.Fatal(err)
+	} else {
+		log.Printf("get success for %s: %v\n", "w1", got)
+	}
+}
+
 func TestConOp(t *testing.T) {
-	cf := config.GetDefaultConfig()
-	var wg sync.WaitGroup
-	for i := 1; i <= cf.ClientCnt; i++ {
+	work := make(chan string, 1000)
+	wg := sync.WaitGroup{}
+	//wg.Add(1)
+	//go func() {
+	//	defer wg.Done()
+	//	file, err := os.OpenFile("res.txt", os.O_CREATE|os.O_RDWR, 0777)
+	//	if err != nil {
+	//		log.Fatal(err)
+	//	}
+	//	for {
+	//		select {
+	//		case <-time.After(5 * time.Second):
+	//			return
+	//		case line := <-work:
+	//			file.WriteString(line)
+	//		}
+	//	}
+	//}()
+
+	for i := 1; i <= N; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func(uid int) {
 			defer wg.Done()
-			conOp(idx, cf)
+			op(uid, work)
 		}(i)
 	}
 	wg.Wait()
+
 }
-
-func conOp(c int, cf *config.Config) {
-	conn, err := grpc.NewClient("127.0.0.1:19090", grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatal(err)
-	}
-	cli := NewEMMClient(c, cf, cemm.NewCEMMClient(conn))
-
-	if c == 1 {
+func op(uid int, work chan string) {
+	cli := getCli(uid)
+	if uid%2 == 0 {
 		for i := 1; i <= 300; i++ {
-			err := cli.Add("key1", "value1_"+strconv.Itoa(i))
+			err := cli.Add("w1", fmt.Sprintf("%d_%d", uid, i))
 			if err != nil {
 				log.Println(err)
-				return
 			}
-			//time.Sleep(10 * time.Millisecond)
 		}
-
-	} else if c == 2 {
-		for i := 1; i <= 300; i++ {
-			err := cli.Add("key1", "value1_"+strconv.Itoa(i+300))
-			if err != nil {
-				log.Println(err)
-				return
-			}
-			//time.Sleep(10 * time.Millisecond)
-		}
-
 	} else {
-		for i := 1; i <= 10; i++ {
-			//delay := 10 + rand.Intn(20)
-			//time.Sleep(time.Duration(delay) * time.Millisecond)
-			res, _ := cli.Get("key1")
-			log.Printf("cli%d search key1 got :%v\n", c, res)
+		for i := 0; i < 200; i++ {
+			got, _ := cli.Get("w1")
+			line := strings.Join(got, ",")
+			log.Println(line)
+			//line += "\n"
+			//work <- line
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
-
-}
-
-func TestName(t *testing.T) {
-	conn, err := grpc.NewClient("127.0.0.1:19091", grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatal(err)
-	}
-	cf := config.GetDefaultConfig()
-	cli := NewEMMClient(1, cf, cemm.NewCEMMClient(conn))
-	for i := 1; i <= 2000; i++ {
-		_, _ = cli.Get("key1")
-		//log.Printf("cli%d search key1 got :%v\n", 1, res)
-	}
-
-}
-
-func TestN(t *testing.T) {
-	fmt.Println(genSt(genKwHash("key1"), 40000)[:3])
 }

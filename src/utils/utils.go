@@ -85,6 +85,7 @@ func AESDecryptCBC(key, ciphertext []byte) ([]byte, error) {
 
 // Xor
 func Xor(s1, s2 []byte) (r []byte) {
+	r = make([]byte, len(s1))
 	for i := 0; i < len(s1); i++ {
 		r[i] = s1[i] ^ s2[i]
 	}

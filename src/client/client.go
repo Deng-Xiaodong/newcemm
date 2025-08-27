@@ -1,13 +1,12 @@
 package client
 
 import (
-	"DRW/src/config"
 	"DRW/src/rpc/cemm"
 	"DRW/src/utils"
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"io"
 	"log"
 	"slices"
@@ -15,149 +14,124 @@ import (
 	"time"
 )
 
-var AESKEY = []byte("abcdefg123456789")
-var PRFKEY = []byte("123456789abcdefg")
-var DUMMY []byte
+const (
+	LIMITROUND = 10000
+	N          = 8
+)
+
+var (
+	AESKEY  = []byte("abcdefg123456789")
+	PRFKEY  = []byte("123456789abcdefg")
+	DummyId []byte
+)
 
 type EMMClient struct {
-	cnt, volume, limitRound int
-	idx                     int
-	state                   map[string]*roundCount
+	uid   int
+	state map[string]*roundCount
 	//方案暂时假定后续添加不能超过初始化的关键字空间
 	stub cemm.CEMMClient
 }
 type roundCount struct {
 	round int
-	count int
+	st    []byte
 }
 
-func NewEMMClient(idx int, cf *config.Config, stub cemm.CEMMClient) *EMMClient {
-	var err error
-	DUMMY, err = utils.AESEncryptCBC(AESKEY, []byte("dummy"))
+func NewEMMClient(uid int, stub cemm.CEMMClient) *EMMClient {
+	did, err := utils.AESEncryptCBC(AESKEY, []byte("dummyId"))
 	if err != nil {
 		log.Fatal(err)
 	}
+	DummyId = did
 	return &EMMClient{
-		cnt:        cf.ClientCnt,
-		volume:     cf.Volume,
-		limitRound: cf.LimitRound,
-		idx:        idx,
-		state:      make(map[string]*roundCount),
-		stub:       stub,
+		uid:   uid,
+		state: make(map[string]*roundCount),
+		stub:  stub,
 	}
 }
 
-func (c *EMMClient) getClientRoundStart(round int) int {
-	return c.cnt*c.volume*(round-1) + c.volume*(c.idx-1) + 1
-}
-func (c *EMMClient) getClientRoundEnd(round int) int {
-	return c.cnt*c.volume*(round-1) + c.volume*c.idx
-}
-func (c *EMMClient) getClientRoundEndWithId(round, id int) int {
-	return c.cnt*c.volume*(round-1) + c.volume*id
-}
-func (c *EMMClient) getAllClientRoundEnd(round int) (sts []int) {
-	for i := 1; i <= c.cnt; i++ {
-		sts = append(sts, c.getClientRoundEndWithId(round, i))
-	}
-	return
-}
-func (c *EMMClient) getRoundEnd(round int) int {
-	return c.cnt * c.volume * round
-}
+func (c *EMMClient) genAddToken(w, id string, round int, tw []byte) (newNode, srchNode *cemm.AddToken, err error) {
 
-func (c *EMMClient) genAddToken(keyword, value string, round int, hw []byte) (next, preNext *cemm.AddToken, err error) {
-
-	cipherValue, err := utils.AESEncryptCBC(AESKEY, []byte(value))
+	cid, err := utils.AESEncryptCBC(AESKEY, []byte(id))
 	if err != nil {
 		return nil, nil, err
 	}
 	//获取关键字计数
-	rc := c.state[keyword]
+	rc := c.state[w]
 	if rc == nil {
 		rc = &roundCount{}
-		c.state[keyword] = rc
+		rc.st = genSt(tw, c.uid, 0)
+		c.state[w] = rc
 	}
-	if rc.round < round {
-		rc.round = round
-		rc.count = c.getClientRoundStart(rc.round)
+	//if rc.round < round {
+	//	rc.round = round
+	//}
+	oldSt := rc.st
+	newSt := make([]byte, 16)
+	io.ReadFull(rand.Reader, newSt)
+	rc.st = newSt
+	srchSt := genSt(tw, c.uid, round)
+
+	newUt := utils.H1(string(slices.Concat(tw, newSt)))
+	srchUt := utils.H1(string(slices.Concat(tw, srchSt)))
+	newDt := slices.Concat(cid, utils.Xor(oldSt, utils.H2(string(slices.Concat(tw, newSt)))))
+	srchDt := slices.Concat(DummyId, utils.Xor(newSt, utils.H2(string(slices.Concat(tw, srchSt)))))
+	return &cemm.AddToken{Addr: newUt, Node: newDt}, &cemm.AddToken{Addr: srchUt, Node: srchDt}, nil
+
+}
+
+func (c *EMMClient) genGetToken(tw []byte, round int, vs int64) *cemm.GetRequest {
+	sts := make([][]byte, 0, N)
+	for i := 1; i <= N; i++ {
+		sts = append(sts, genSt(tw, i, round))
 	}
-	cnt := rc.count
-	rc.count++
-
-	oldSt := genSt(hw, cnt-1)
-	newSt := genSt(hw, cnt)
-	endSt := genSt(hw, c.getClientRoundEnd(round))
-
-	zero := make([]byte, 4, 4)
-	binary.BigEndian.PutUint32(zero, 0)
-
-	//生成字典键值对
-	//tag := genKwTag(hw)
-	//node := slices.Concat(zero, utils.Xor(slices.Concat(oldSt, cipherValue), utils.H2(string(slices.Concat(tag, newSt)))))
-	//endNode := slices.Concat(zero, utils.Xor(slices.Concat(newSt, DUMMY), utils.H2(string(slices.Concat(tag, endSt)))))
-	node := slices.Concat(zero, oldSt, cipherValue)
-	endNode := slices.Concat(zero, newSt, DUMMY)
-
-	//todo 满了，增加轮数
-
-	//return &cemm.AddToken{Addr: utils.H1(string(slices.Concat(tag, newSt))), Node: node},
-	//	&cemm.AddToken{Addr: utils.H1(string(slices.Concat(tag, endSt))), Node: endNode}, nil
-	return &cemm.AddToken{Addr: newSt, Node: node}, &cemm.AddToken{Addr: endSt, Node: endNode}, nil
-
+	return &cemm.GetRequest{Tw: tw, Sts: sts, Vs: vs}
 }
 
-func (c *EMMClient) genGetToken(hw []byte, round int) *cemm.GetRequest {
-	return &cemm.GetRequest{Tag: genKwTag(hw), St: genSt(hw, c.getRoundEnd(round))}
+func genTw(w string) []byte {
+	return utils.H1(w)
+}
+func genSt(tw []byte, uid, r int) []byte {
+	return utils.PRF(PRFKEY, tw, uid, r)
 }
 
-func genKwTag(hw []byte) []byte {
-	return utils.PRF(PRFKEY, hw)
-}
-func genKwHash(keyword string) []byte {
-	return utils.H1(keyword)
-}
-func genSt(hw []byte, i int) []byte {
-	return utils.PRF(PRFKEY, hw, i)
-}
+func (c *EMMClient) Add(w, id string) error {
 
-func (c *EMMClient) Add(keyword, value string) error {
-
-	hw := genKwHash(keyword)
+	tw := genTw(w)
 	var round int
-	if rly, err := c.stub.GetOrIncRound(context.Background(), &cemm.RoundRequest{Op: false, Hw: hw}); err != nil {
+	if rly, err := c.stub.AddRound(context.Background(), &emptypb.Empty{}); err != nil {
 		return err
 	} else {
 		round = int(rly.Round)
 	}
 
-	next, preNext, err := c.genAddToken(keyword, value, round, hw)
+	newNode, srchNode, err := c.genAddToken(w, id, round, tw)
 	if err != nil {
 		return err
 	}
-	if _, err = c.stub.Add(context.Background(), &cemm.AddRequest{Next: next, PreNext: preNext}); err != nil {
+	if _, err = c.stub.Add(context.Background(), &cemm.AddRequest{NewNode: newNode, SrchNode: srchNode}); err != nil {
 		return err
 	}
 	return nil
 }
-
 func (c *EMMClient) Get(keyword string) ([]string, error) {
-	hw := genKwHash(keyword)
+	tw := genTw(keyword)
 
 	var round int
-	if rly, err := c.stub.GetOrIncRound(context.Background(), &cemm.RoundRequest{Op: true, Hw: hw}); err != nil {
+	var vs int64
+	if rly, err := c.stub.SearchRound(context.Background(), &emptypb.Empty{}); err != nil {
 		log.Printf("RPC ERROR: GetRound fail %v\n", err)
 		return nil, err
 	} else {
 		round = int(rly.Round)
+		vs = rly.Vs
 	}
-
-	gtk := c.genGetToken(hw, round)
+	//log.Printf("Get round %d, vs %d\n", round, vs)
+	gtk := c.genGetToken(tw, round, vs)
 	var res []string
 
 	//测试用
 	res = append(res, strconv.Itoa(round))
-
+	var cps [][]byte
 	if stream, err := c.stub.Get(context.Background(), gtk); err == nil {
 		for {
 			recv, errRecv := stream.Recv()
@@ -168,103 +142,59 @@ func (c *EMMClient) Get(keyword string) ([]string, error) {
 				log.Printf("RPC ERROR: Get fail %v\n", errRecv)
 				return nil, errRecv
 			}
-			var text []byte
-			text, err = utils.AESDecryptCBC(AESKEY, recv.Node)
-			if err != nil {
-				return nil, err
-			}
-			res = append(res, string(text))
+			cps = append(cps, recv.Node)
 		}
 
 	} else {
 		return nil, err
 	}
+
+	for _, cp := range cps {
+		var text []byte
+		text, err := utils.AESDecryptCBC(AESKEY, cp)
+		if err != nil {
+			return nil, err
+		}
+		if string(text) != "dummyId" {
+			res = append(res, string(text))
+		}
+
+	}
+
 	return res, nil
 }
-func (c *EMMClient) Init(data [][]string) error {
+func (c *EMMClient) Init(ws []string) error {
 
 	stream, err := c.stub.Init(context.Background())
 	if err != nil {
 		return err
 	}
-	for _, cell := range data {
-		initTokens := make([]*cemm.AddToken, 0, len(cell)+c.cnt*c.limitRound+2)
-		hw := genKwHash(cell[0]) //RPF的输入，生成st
-		//tag := genKwTag(hw)      //哈希函数的输入，保护数据
-		one := make([]byte, 4, 4)
-		zero := make([]byte, 4, 4)
-		binary.BigEndian.PutUint32(one, 1)
-		binary.BigEndian.PutUint32(zero, 0)
-		//先处理数据在处理dummy
-		orst := make([]byte, 32, 32)
-		nrst := make([]byte, 32, 32)
-		var rnode []byte
-		io.ReadFull(rand.Reader, orst)
-		var cx []byte
-		cx, err = utils.AESEncryptCBC(AESKEY, []byte(cell[1]))
-		if err != nil {
-			return err
-		}
-		//rnode = slices.Concat(zero, utils.Xor(slices.Concat(slices.Repeat([]byte{'0'}, 32), cx), utils.H2(string(slices.Concat(tag, orst)))))
-		//initTokens = append(initTokens, &cemm.AddToken{Addr: utils.H1(string(slices.Concat(tag, orst))), Node: slices.Clone(rnode)})
-		rnode = slices.Concat(one, slices.Repeat([]byte{'0'}, 32), cx)
-		initTokens = append(initTokens, &cemm.AddToken{Addr: slices.Clone(orst), Node: slices.Clone(rnode)})
-		for i := 2; i < len(cell); i++ {
-			io.ReadFull(rand.Reader, nrst)
-			cx, err = utils.AESEncryptCBC(AESKEY, []byte(cell[i]))
-			if err != nil {
+	for uid := 1; uid <= N; uid++ {
+		for _, w := range ws {
+			initTokens := make([]*cemm.AddToken, 0, LIMITROUND)
+			tw := genTw(w)
+
+			ost := genSt(tw, uid, 0)
+			var nst []byte
+
+			for r := 1; r <= LIMITROUND; r++ {
+				nst = genSt(tw, uid, r)
+				//log.Printf("round %d st=%v\n", r, nst)
+				initTokens = append(initTokens, &cemm.AddToken{
+					Addr: utils.H1(string(slices.Concat(tw, nst))),
+					//Node: slices.Concat(DummyId, ost),
+					Node: slices.Concat(DummyId, utils.Xor(ost, utils.H2(string(slices.Concat(tw, nst))))),
+				})
+				ost = slices.Clone(nst)
+			}
+			//初始化一个关键字
+			if err = stream.Send(&cemm.InitRequest{Nodes: initTokens}); err != nil {
 				return err
 			}
-			//rnode = slices.Concat(zero, utils.Xor(slices.Concat(orst, cx), utils.H2(string(slices.Concat(tag, nrst)))))
-			//initTokens = append(initTokens, &cemm.AddToken{
-			//	Addr: utils.H1(string(slices.Concat(tag, nrst))),
-			//	Node: slices.Clone(rnode),
-			//})
-			rnode = slices.Concat(one, orst, cx)
-			initTokens = append(initTokens, &cemm.AddToken{
-				Addr: slices.Clone(nrst),
-				Node: slices.Clone(rnode),
-			})
-			orst = slices.Clone(nrst) //第一行会改变
-		}
-
-		if cell[0] != "key1" {
-			continue
-		}
-
-		odst := genSt(hw, 0)
-		var ndst []byte
-		//dnode := slices.Concat(zero, utils.Xor(slices.Concat(orst, DUMMY), utils.H2(string(slices.Concat(tag, odst)))))
-		//initTokens = append(initTokens, &cemm.AddToken{Addr: utils.H1(string(slices.Concat(tag, odst))), Node: slices.Clone(dnode)})
-		dnode := slices.Concat(zero, orst, DUMMY)
-		initTokens = append(initTokens, &cemm.AddToken{
-			Addr: slices.Clone(odst),
-			Node: slices.Clone(dnode),
-		})
-
-		t := c.volume
-		for i := 1; i <= c.limitRound; i++ {
-			for j := 1; j <= c.cnt; j++ {
-				ndst = genSt(hw, t)
-				t += c.volume
-				//dnode = slices.Concat(zero, utils.Xor(slices.Concat(odst, DUMMY), utils.H2(string(slices.Concat(tag, ndst)))))
-				//initTokens = append(initTokens, &cemm.AddToken{Addr: utils.H1(string(slices.Concat(tag, ndst))), Node: slices.Clone(dnode)})
-				dnode = slices.Concat(zero, odst, DUMMY)
-				initTokens = append(initTokens, &cemm.AddToken{
-					Addr: slices.Clone(ndst),
-					Node: slices.Clone(dnode),
-				})
-				//odst = ndst //第一行不会改变，最好还是用副本
-				odst = slices.Clone(ndst)
-			}
 
 		}
-		//初始化一个关键字
-		if err = stream.Send(&cemm.InitRequest{Hw: hw, Nodes: initTokens}); err != nil {
-			return err
-		}
-
 	}
+
 	//关闭流
 	time.Sleep(time.Second)
 	_ = stream.CloseSend()
