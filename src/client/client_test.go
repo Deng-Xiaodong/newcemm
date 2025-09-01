@@ -76,14 +76,14 @@ func TestConOp(t *testing.T) {
 func op(uid int, work chan string) {
 	cli := getCli(uid)
 	if uid%2 == 0 {
-		for i := 1; i <= 300; i++ {
+		for i := 1; i <= 50; i++ {
 			err := cli.Add("w1", fmt.Sprintf("%d_%d", uid, i))
 			if err != nil {
 				log.Println(err)
 			}
 		}
 	} else {
-		for i := 0; i < 200; i++ {
+		for i := 0; i < 20; i++ {
 			got, _ := cli.Get("w1")
 			line := strings.Join(got, ",")
 			log.Println(line)

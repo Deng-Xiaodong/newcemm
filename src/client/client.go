@@ -4,8 +4,8 @@ import (
 	"DRW/src/rpc/cemm"
 	"DRW/src/utils"
 	"context"
-	"crypto/rand"
 	"errors"
+	"fmt"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"io"
 	"log"
@@ -33,7 +33,7 @@ type EMMClient struct {
 }
 type roundCount struct {
 	round int
-	st    []byte
+	cnt   int
 }
 
 func NewEMMClient(uid int, stub cemm.CEMMClient) *EMMClient {
@@ -51,47 +51,55 @@ func NewEMMClient(uid int, stub cemm.CEMMClient) *EMMClient {
 
 func (c *EMMClient) genAddToken(w, id string, round int, tw []byte) (newNode, srchNode *cemm.AddToken, err error) {
 
-	cid, err := utils.AESEncryptCBC(AESKEY, []byte(id))
+	eid, err := utils.AESEncryptCBC(AESKEY, []byte(id))
 	if err != nil {
 		return nil, nil, err
 	}
 	//获取关键字计数
 	rc := c.state[w]
 	if rc == nil {
-		rc = &roundCount{}
-		rc.st = genSt(tw, c.uid, 0)
+		rc = &roundCount{round: 1, cnt: 1}
 		c.state[w] = rc
 	}
-	//if rc.round < round {
-	//	rc.round = round
-	//}
-	oldSt := rc.st
-	newSt := make([]byte, 16)
-	io.ReadFull(rand.Reader, newSt)
-	rc.st = newSt
-	srchSt := genSt(tw, c.uid, round)
-
-	newUt := utils.H1(string(slices.Concat(tw, newSt)))
-	srchUt := utils.H1(string(slices.Concat(tw, srchSt)))
-	newDt := slices.Concat(cid, utils.Xor(oldSt, utils.H2(string(slices.Concat(tw, newSt)))))
-	srchDt := slices.Concat(DummyId, utils.Xor(newSt, utils.H2(string(slices.Concat(tw, srchSt)))))
-	return &cemm.AddToken{Addr: newUt, Node: newDt}, &cemm.AddToken{Addr: srchUt, Node: srchDt}, nil
+	kw := genKw(w, c.uid, round)
+	if rc.round < round {
+		ost := genSt(w, c.uid, rc.round)
+		nst := genSt(w, c.uid, round)
+		tt := slices.Concat(tw, nst)
+		sk := slices.Concat(ost, kw)
+		srchNode = &cemm.AddToken{
+			Addr: utils.H1(string(tt)),
+			Node: utils.Xor(sk, utils.H2(string(tt))),
+		}
+		rc.round = round
+		rc.cnt = 1
+	}
+	cnt := rc.cnt
+	rc.cnt++
+	newNode = &cemm.AddToken{
+		Addr: utils.H3(string(kw) + strconv.Itoa(cnt)),
+		Node: eid,
+	}
+	return
 
 }
 
-func (c *EMMClient) genGetToken(tw []byte, round int, vs int64) *cemm.GetRequest {
+func (c *EMMClient) genGetToken(tw []byte, w string, round int, vs int64) *cemm.GetRequest {
 	sts := make([][]byte, 0, N)
 	for i := 1; i <= N; i++ {
-		sts = append(sts, genSt(tw, i, round))
+		sts = append(sts, genSt(w, i, round))
 	}
 	return &cemm.GetRequest{Tw: tw, Sts: sts, Vs: vs}
 }
 
 func genTw(w string) []byte {
-	return utils.H1(w)
+	return utils.PRF(PRFKEY, utils.H0(w))
 }
-func genSt(tw []byte, uid, r int) []byte {
-	return utils.PRF(PRFKEY, tw, uid, r)
+func genSt(w string, uid, r int) []byte {
+	return utils.PRF(PRFKEY, append(utils.H0(w), []byte(fmt.Sprintf("%d%d%d", uid, r, 0))...))[:16]
+}
+func genKw(w string, uid, r int) []byte {
+	return utils.PRF(PRFKEY, append(utils.H0(w), []byte(fmt.Sprintf("%d%d%d", uid, r, 1))...))[:16]
 }
 
 func (c *EMMClient) Add(w, id string) error {
@@ -113,8 +121,8 @@ func (c *EMMClient) Add(w, id string) error {
 	}
 	return nil
 }
-func (c *EMMClient) Get(keyword string) ([]string, error) {
-	tw := genTw(keyword)
+func (c *EMMClient) Get(w string) ([]string, error) {
+	tw := genTw(w)
 
 	var round int
 	var vs int64
@@ -126,7 +134,7 @@ func (c *EMMClient) Get(keyword string) ([]string, error) {
 		vs = rly.Vs
 	}
 	//log.Printf("Get round %d, vs %d\n", round, vs)
-	gtk := c.genGetToken(tw, round, vs)
+	gtk := c.genGetToken(tw, w, round, vs)
 	var res []string
 
 	//测试用
@@ -174,16 +182,16 @@ func (c *EMMClient) Init(ws []string) error {
 			initTokens := make([]*cemm.AddToken, 0, LIMITROUND)
 			tw := genTw(w)
 
-			ost := genSt(tw, uid, 0)
+			ost := genSt(w, uid, 0)
 			var nst []byte
 
 			for r := 1; r <= LIMITROUND; r++ {
-				nst = genSt(tw, uid, r)
-				//log.Printf("round %d st=%v\n", r, nst)
+				nst = genSt(w, uid, r)
+				kw := genKw(w, uid, r)
+				tt := slices.Concat(tw, nst)
 				initTokens = append(initTokens, &cemm.AddToken{
-					Addr: utils.H1(string(slices.Concat(tw, nst))),
-					//Node: slices.Concat(DummyId, ost),
-					Node: slices.Concat(DummyId, utils.Xor(ost, utils.H2(string(slices.Concat(tw, nst))))),
+					Addr: utils.H1(string(tt)),
+					Node: utils.Xor(slices.Concat(ost, kw), utils.H2(string(tt))),
 				})
 				ost = slices.Clone(nst)
 			}

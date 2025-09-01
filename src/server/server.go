@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,10 +44,8 @@ type EMMServer struct {
 	version *AtomicCounter
 	round   *AtomicCounter
 	db      sync.Map
+	sdb     sync.Map
 	vsDb    sync.Map
-
-	//workChan chan int64
-	//tc       int
 }
 
 func (s *EMMServer) AddRound(ctx context.Context, empty *emptypb.Empty) (*cemm.AddRoundReply, error) {
@@ -79,10 +78,8 @@ func (s *EMMServer) Init(stream grpc.ClientStreamingServer[cemm.InitRequest, emp
 			}
 			return err
 		}
-		var v int64 = 1
 		for _, data := range req.Nodes {
-			s.vsDb.Store(string(data.Addr), &v)
-			s.db.Store(string(data.Addr), data.Node)
+			s.sdb.Store(string(data.Addr), data.Node)
 		}
 
 	}
@@ -102,40 +99,59 @@ func (s *EMMServer) Get(in *cemm.GetRequest, stream grpc.ServerStreamingServer[c
 	tw := in.Tw
 	svs := in.Vs
 
+	//for客户端
 	for _, sst := range sts {
+		//客户端游标
 		st := sst
+		//for查询轮
 		for {
-			ut := utils.H1(string(slices.Concat(tw, st)))
-			value, ok1 := s.db.Load(string(ut))
-			if !ok1 {
+			tt := slices.Concat(tw, st)
+			ed, ok := s.sdb.Load(string(utils.H1(string(tt))))
+			if !ok {
+				//log.Printf("sts[%v] not found", st[:8])
 				break
 			}
-			data := value.([]byte)
-			cid := data[:32]
-			st = utils.Xor(data[32:], utils.H2(string(slices.Concat(tw, st))))
+			sk := utils.Xor(ed.([]byte), utils.H2(string(tt)))
+			ost := sk[:16]
+			kw := sk[16:]
 
-			vs, ok2 := s.vsDb.Load(string(ut))
-			if !ok2 {
-				return errors.New("not found version")
-			}
-			vv := vs.(*int64)
+			cnt := 1
+			//for数据链
 			for {
-				v := atomic.LoadInt64(vv)
-				if v > 0 {
-					if v < svs {
-						_ = stream.Send(&cemm.GetReply{Node: cid})
-					} else {
-						log.Printf("miss node svs(%d)<nv(%d)\n", svs, v)
-					}
+				ut := string(utils.H3(string(kw) + strconv.Itoa(cnt)))
+				eid, ok1 := s.db.Load(ut)
+				if !ok1 {
 					break
-				} else {
-					if atomic.CompareAndSwapInt64(vv, v, -svs) {
-						break
-					}
+					//log.Printf("sts[%v] not found", st[:8])
 				}
+				vs, ok2 := s.vsDb.Load(ut)
+				if !ok2 {
+					return errors.New("not found version")
+				}
+				vv := vs.(*int64)
+				//for+CAS
+				for {
+					v := atomic.LoadInt64(vv)
+					if v > 0 {
+						if v < svs {
+							_ = stream.Send(&cemm.GetReply{Node: eid.([]byte)})
+						} else {
+							log.Printf("miss node svs(%d)<nv(%d)\n", svs, v)
+						}
+						break
+					} else {
+						if atomic.CompareAndSwapInt64(vv, v, -svs) {
+							break
+						}
+					}
 
+				}
+				cnt++ //数据链游标
 			}
+			st = slices.Clone(ost) //状态链游标
+
 		}
+
 	}
 
 	return nil
@@ -145,7 +161,9 @@ func (s *EMMServer) Add(ctx context.Context, in *cemm.AddRequest) (*emptypb.Empt
 	var v int64
 	s.vsDb.Store(string(in.NewNode.Addr), &v)
 	s.db.Store(string(in.NewNode.Addr), in.NewNode.Node)
-	s.db.Store(string(in.SrchNode.Addr), in.SrchNode.Node)
+	if in.SrchNode != nil {
+		s.sdb.Store(string(in.SrchNode.Addr), in.SrchNode.Node)
+	}
 
 	time.Sleep(6 * time.Millisecond) //测试用
 	for {

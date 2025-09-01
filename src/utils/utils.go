@@ -9,8 +9,15 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
-	"strconv"
+	"log"
 )
+
+func H0(message string) []byte {
+	salt := "01"
+	data := []byte(message + salt) // 拼接消息和盐值
+	hash := sha256.Sum256(data)    // 计算 SHA256 哈希
+	return hash[:]                 // 32字节
+}
 
 // H1 计算消息与盐值的 SHA256 哈希
 func H1(message string) []byte {
@@ -27,13 +34,18 @@ func H2(message string) []byte {
 	hash := sha256.Sum256(data)    // 计算 SHA256 哈希
 	return hash[:]                 // 32字节
 }
-func PRF(key, hw []byte, cnts ...int) []byte {
-	hmac := hmac.New(sha256.New, key)
-	hmac.Write(hw)
-	for _, cnt := range cnts {
-		hmac.Write([]byte(strconv.Itoa(cnt)))
+func H3(message string) []byte {
+	salt := "03"
+	data := []byte(message + salt) // 拼接消息和盐值
+	hash := sha256.Sum256(data)    // 计算 SHA256 哈希
+	return hash[:]                 // 32字节
+}
+func PRF(key []byte, ins ...[]byte) []byte {
+	hm := hmac.New(sha256.New, key)
+	for _, in := range ins {
+		hm.Write(in)
 	}
-	return hmac.Sum(nil)
+	return hm.Sum(nil)
 }
 
 // 加密函数
@@ -85,6 +97,9 @@ func AESDecryptCBC(key, ciphertext []byte) ([]byte, error) {
 
 // Xor
 func Xor(s1, s2 []byte) (r []byte) {
+	if len(s1) != len(s2) {
+		log.Panicln("Xor: length mismatch")
+	}
 	r = make([]byte, len(s1))
 	for i := 0; i < len(s1); i++ {
 		r[i] = s1[i] ^ s2[i]
